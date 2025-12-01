@@ -1,82 +1,64 @@
 import express from "express";
-import dotenv from "dotenv";
 import axios from "axios";
 
-dotenv.config();
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(express.json());
 
-// مهم: تأكد أننا نقرأ JSON لأي Content-Type
-app.use(express.json({ type: "*/*" }));
+// ---------------------------
+// ENV VARIABLES
+// ---------------------------
+const EASY_API_KEY = process.env.EASY_API_KEY;
+const MERCHANT_CODE = process.env.MERCHANT_CODE;
 
-// Health check
-app.get("/health", (req, res) => res.status(200).send("OK"));
-
-// دوال مساعدة مع Tabby API
-async function capturePayment(paymentId) {
-  const url = `https://api.tabby.ai/api/v2/payments/${paymentId}/captures`;
-  return axios.post(url, {}, {
-    headers: { Authorization: `Bearer ${process.env.TABBY_SECRET_KEY}` }
-  });
-}
-
-async function retrievePayment(paymentId) {
-  const url = `https://api.tabby.ai/api/v2/payments/${paymentId}`;
-  return axios.get(url, {
-    headers: { Authorization: `Bearer ${process.env.TABBY_SECRET_KEY}` }
-  });
-}
-
-// ====== Webhook المهم ======
-app.post("/webhook", (req, res) => {
+// ---------------------------
+// MAIN WEBHOOK ROUTE
+// ---------------------------
+app.post("/tabby-webhook", async (req, res) => {
   try {
-    // اطبع كل ما يصل من Tabby/المتجر للتشخيص
-    console.log("✅ Webhook received:", JSON.stringify(req.body));
+    const data = req.body;
 
-    const { type, event, data, payment_id, payment } = req.body || {};
+    console.log("Webhook Received:", data);
 
-    // التعرّف على الـ paymentId من أكثر من شكل payload
-    const paymentId =
-      data?.id ||
-      data?.payment?.id ||
-      payment_id ||
-      payment?.id ||
-      req.body?.id;
+    const status = data.status;
+    const orderId = data.order?.reference_id;
 
-    // مثال: التقاط تلقائي بعد authorization إذا كان AUTOCAPTURE=true
-    if ((type === "payment.authorized" || event === "payment.authorized") &&
-        process.env.AUTOCAPTURE === "true" &&
-        paymentId) {
-      capturePayment(paymentId)
-        .then(r => console.log("🤖 Auto-capture OK:", r.status))
-        .catch(e => console.error("❌ Auto-capture failed:", e?.response?.data || e.message));
+    if (!orderId) {
+      console.log("❌ No order ID in webhook payload");
+      return res.status(400).send("Missing order ID");
     }
 
-    // رد سريع 200 حتى لا تعيد الجهة الإرسال
-    res.status(200).send("ok");
-  } catch (e) {
-    console.error("Webhook handler error:", e);
-    res.status(200).send("ok");
+    let newStatus = "";
+
+    if (status === "authorized") newStatus = "paid";
+    else if (status === "closed") newStatus = "paid";
+    else if (status === "rejected") newStatus = "paid_failed";
+    else if (status === "expired") newStatus = "pending_payment";
+
+    if (!newStatus) return res.status(200).send("Ignored");
+
+    // UPDATE Order in EasyOrders
+    await axios.patch(
+      `https://api.easy-orders.net/api/v1/external-apps/orders/${orderId}/status`,
+      { status: newStatus },
+      {
+        headers: {
+          "Api-Key": EASY_API_KEY,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    console.log(`✅ Order ${orderId} updated to ${newStatus}`);
+
+    return res.status(200).send("OK");
+  } catch (err) {
+    console.error("❌ Webhook Error:", err);
+    return res.status(500).send("Webhook failed");
   }
 });
 
-// نقاط مساعدة اختيارية
-app.post("/capture/:paymentId", async (req, res) => {
-  try {
-    const r = await capturePayment(req.params.paymentId);
-    res.status(200).json(r.data);
-  } catch (e) {
-    res.status(e?.response?.status || 500).json(e?.response?.data || { error: e.message });
-  }
-});
+// ---------------------------
+app.get("/", (req, res) => res.send("Tabby Webhook Running ✔"));
 
-app.get("/payment/:paymentId", async (req, res) => {
-  try {
-    const r = await retrievePayment(req.params.paymentId);
-    res.status(200).json(r.data);
-  } catch (e) {
-    res.status(e?.response?.status || 500).json(e?.response?.data || { error: e.message });
-  }
-});
-
-app.listen(PORT, () => console.log(`Server running on :${PORT}`));
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log("🚀 Webhook Running on Port", PORT));
