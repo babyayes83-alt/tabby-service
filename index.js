@@ -62,3 +62,4 @@ app.get("/", (req, res) => res.send("Tabby Webhook Running ✔"));
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log("🚀 Webhook Running on Port", PORT));
+app.post("/tabby-webhook", async (req, res) => {
